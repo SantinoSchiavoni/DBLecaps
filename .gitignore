@@ -1,0 +1,12 @@
+# dependencias
+node_modules
+
+# build
+dist
+
+# env
+.env
+.env.*
+# env
+.env
+lecaps-app/.env

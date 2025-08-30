@@ -1,0 +1,52 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # 📦 Instalar dependencias dentro de la app
+      - name: Install deps
+        working-directory: lecaps-app
+        run: npm ci
+
+      # 🔐 Crear .env dentro de lecaps-app con los secrets
+      - name: Write .env for build
+        working-directory: lecaps-app
+        run: |
+          echo "VITE_SUPABASE_URL=${{ secrets.VITE_SUPABASE_URL }}" >> .env
+          echo "VITE_SUPABASE_ANON_KEY=${{ secrets.VITE_SUPABASE_ANON_KEY }}" >> .env
+
+      # 🏗️ Build de Vite
+      - name: Build
+        working-directory: lecaps-app
+        run: npm run build
+
+      # ⬆️ Subir la carpeta dist como artifact para Pages
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: lecaps-app/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
