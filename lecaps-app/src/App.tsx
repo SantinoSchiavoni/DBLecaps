@@ -1,50 +1,56 @@
 import React, { useEffect, useMemo, useState } from "react"
-import { createClient } from "@supabase/supabase-js"
+import { supabase } from "./supabaseClient"
 
-// 🔑 Cliente Supabase
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string
-const supabaseAnon = import.meta.env.VITE_SUPABASE_ANON_KEY as string
-const supabase = createClient(supabaseUrl, supabaseAnon)
-
-// Utilidades
+/* ============= Helpers ============= */
 function diffDaysUTC(a: Date, b: Date) {
   const ms =
     Date.UTC(a.getFullYear(), a.getMonth(), a.getDate()) -
     Date.UTC(b.getFullYear(), b.getMonth(), b.getDate())
-  return Math.round(ms / (1000 * 60 * 60 * 24))
+  return Math.max(1, Math.round(ms / (1000 * 60 * 60 * 24)))
 }
-
 function fmtPct(x: number | null | undefined) {
   if (x === null || x === undefined || Number.isNaN(x)) return "-"
   return (x * 100).toFixed(2) + "%"
 }
-
 function fmtNumber(x: number | null | undefined, decimals = 2) {
   if (x === null || x === undefined || Number.isNaN(x)) return "-"
-  return x.toLocaleString(undefined, {
+  return Number(x).toLocaleString(undefined, {
     minimumFractionDigits: decimals,
     maximumFractionDigits: decimals,
   })
 }
 
-function computeMetrics({
-  precio_compra,
-  cantidad,
-  valor_nominal,
-  vencimiento,
-  fecha_compra,
-}: any) {
-  const P = Number(precio_compra) * Number(cantidad) // precio por VN100 * cantidad
-  const VN = Number(valor_nominal || 100) * Number(cantidad)
-  const d0 = fecha_compra ? new Date(fecha_compra) : new Date()
-  const d1 = vencimiento ? new Date(vencimiento) : new Date()
-  const dias = Math.max(1, diffDaysUTC(d1, d0))
-  const tna = ((VN - P) / P) * (365 / dias)
-  const tea = Math.pow(VN / P, 365 / dias) - 1
+/** Cálculos:
+ * P   = cantidad * precio_compra
+ * VF  = cantidad * precio_finish
+ * días = fecha_finish - fecha_compra
+ * TNA ≈ ((VF - P) / P) * (365 / días)
+ * TEA = (VF / P)^(365 / días) - 1
+ * YTM ≈ TEA (bullet)
+ */
+function computeMetrics(row: any) {
+  const cantidad = Number(row.cantidad || 0)
+  const pc = Number(row.precio_compra || 0)
+  const pf = Number(row.precio_finish || 0)
+  const P = cantidad * pc
+  const VF = cantidad * pf
+
+  const d0 = row.fecha_compra ? new Date(row.fecha_compra) : new Date()
+  const d1 = row.fecha_finish ? new Date(row.fecha_finish) : new Date()
+  const dias = diffDaysUTC(d1, d0)
+
+  if (P <= 0 || VF <= 0) {
+    return { dias, P: 0, VF: 0, tna: NaN, tea: NaN, ytm: NaN, ret: NaN }
+  }
+
+  const ret = (VF - P) / P
+  const tna = ret * (365 / dias)
+  const tea = Math.pow(VF / P, 365 / dias) - 1
   const ytm = tea
-  return { dias, P, VN, tna, tea, ytm }
+  return { dias, P, VF, tna, tea, ytm, ret }
 }
 
+/* ============= App ============= */
 export default function App() {
   const [session, setSession] = useState<any>(null)
   const [loading, setLoading] = useState(true)
@@ -60,18 +66,19 @@ export default function App() {
     return () => sub.subscription.unsubscribe()
   }, [])
 
-  if (loading)
+  if (loading) {
     return (
       <div className="min-h-screen grid place-items-center text-gray-700">
         Cargando…
       </div>
     )
+  }
 
   if (!session) return <AuthScreen />
   return <Dashboard user={session.user} />
 }
 
-// 🔐 Pantalla de login/registro
+/* ============= Auth Screen ============= */
 function AuthScreen() {
   const [mode, setMode] = useState<"signin" | "signup">("signin")
   const [email, setEmail] = useState("")
@@ -160,19 +167,17 @@ function AuthScreen() {
   )
 }
 
-// 📊 Dashboard
+/* ============= Dashboard ============= */
 function Dashboard({ user }: { user: any }) {
   const [rows, setRows] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [form, setForm] = useState<any>({
-    especie: "LECAP",
-    vencimiento: "",
-    valor_nominal: 100,
-    cantidad: 1,
+    ticker: "",
     precio_compra: "",
+    precio_finish: "",
     fecha_compra: "",
-    broker: "",
-    notas: "",
+    fecha_finish: "",
+    cantidad: "",
   })
 
   async function load() {
@@ -181,7 +186,7 @@ function Dashboard({ user }: { user: any }) {
       .from("holdings")
       .select("*")
       .eq("user_id", user.id)
-      .order("vencimiento", { ascending: true })
+      .order("fecha_finish", { ascending: true })
     if (error) console.error(error)
     setRows(data || [])
     setLoading(false)
@@ -194,23 +199,26 @@ function Dashboard({ user }: { user: any }) {
   async function addRow(e: React.FormEvent) {
     e.preventDefault()
     const payload = {
-      ...form,
-      valor_nominal: Number(form.valor_nominal) || 100,
-      cantidad: Number(form.cantidad) || 0,
+      ticker: form.ticker.trim(),
       precio_compra: Number(form.precio_compra) || 0,
+      precio_finish: Number(form.precio_finish) || 0,
+      fecha_compra: form.fecha_compra,
+      fecha_finish: form.fecha_finish,
+      cantidad: Number(form.cantidad) || 0,
       user_id: user.id,
     }
+    if (!payload.ticker) return alert("Falta el ticker")
+    if (!payload.precio_compra || !payload.precio_finish)
+      return alert("Cargá precios válidos")
     const { error } = await supabase.from("holdings").insert(payload)
     if (error) return alert(error.message)
     setForm({
-      especie: "LECAP",
-      vencimiento: "",
-      valor_nominal: 100,
-      cantidad: 1,
+      ticker: "",
       precio_compra: "",
+      precio_finish: "",
       fecha_compra: "",
-      broker: "",
-      notas: "",
+      fecha_finish: "",
+      cantidad: "",
     })
     load()
   }
@@ -233,14 +241,14 @@ function Dashboard({ user }: { user: any }) {
 
   const totals = useMemo(() => {
     let inv = 0,
-      vn = 0
+      vf = 0
     rows.forEach((r) => {
       const m = computeMetrics(r)
       inv += m.P
-      vn += m.VN
+      vf += m.VF
     })
-    const diff = vn - inv
-    return { inv, vn, diff }
+    const diff = vf - inv
+    return { inv, vf, diff }
   }, [rows])
 
   return (
@@ -269,55 +277,27 @@ function Dashboard({ user }: { user: any }) {
       <main className="max-w-5xl mx-auto p-4 md:p-8 space-y-6">
         <section className="grid md:grid-cols-3 gap-4">
           <Card title="Invertido">${fmtNumber(totals.inv)}</Card>
-          <Card title="Valor a Vencimiento (VN)">${fmtNumber(totals.vn)}</Card>
+          <Card title="Valor a Finish">${fmtNumber(totals.vf)}</Card>
           <Card title="Resultado Bruto">${fmtNumber(totals.diff)}</Card>
         </section>
 
         <section className="bg-white rounded-2xl shadow p-4 md:p-6">
           <h2 className="text-lg font-semibold mb-3">Agregar compra</h2>
-          <form onSubmit={addRow} className="grid md:grid-cols-8 gap-3">
+          <form onSubmit={addRow} className="grid md:grid-cols-12 gap-3">
             <input
               className="border rounded-xl px-3 py-2 md:col-span-2"
-              placeholder="Especie"
-              value={form.especie}
-              onChange={(e) => setForm((f: any) => ({ ...f, especie: e.target.value }))}
+              placeholder="Ticker (S12S5...)"
+              value={form.ticker}
+              onChange={(e) =>
+                setForm((f: any) => ({ ...f, ticker: e.target.value }))
+              }
             />
             <input
               required
               className="border rounded-xl px-3 py-2 md:col-span-2"
-              type="date"
-              value={form.vencimiento}
-              onChange={(e) =>
-                setForm((f: any) => ({ ...f, vencimiento: e.target.value }))
-              }
-            />
-            <input
-              className="border rounded-xl px-3 py-2"
               type="number"
               step="0.01"
-              placeholder="VN"
-              value={form.valor_nominal}
-              onChange={(e) =>
-                setForm((f: any) => ({ ...f, valor_nominal: e.target.value }))
-              }
-            />
-            <input
-              required
-              className="border rounded-xl px-3 py-2"
-              type="number"
-              step="0.01"
-              placeholder="Cant."
-              value={form.cantidad}
-              onChange={(e) =>
-                setForm((f: any) => ({ ...f, cantidad: e.target.value }))
-              }
-            />
-            <input
-              required
-              className="border rounded-xl px-3 py-2"
-              type="number"
-              step="0.01"
-              placeholder="Precio x VN100"
+              placeholder="Precio compra"
               value={form.precio_compra}
               onChange={(e) =>
                 setForm((f: any) => ({ ...f, precio_compra: e.target.value }))
@@ -325,14 +305,45 @@ function Dashboard({ user }: { user: any }) {
             />
             <input
               required
-              className="border rounded-xl px-3 py-2"
+              className="border rounded-xl px-3 py-2 md:col-span-2"
+              type="number"
+              step="0.01"
+              placeholder="Precio finish"
+              value={form.precio_finish}
+              onChange={(e) =>
+                setForm((f: any) => ({ ...f, precio_finish: e.target.value }))
+              }
+            />
+            <input
+              required
+              className="border rounded-xl px-3 py-2 md:col-span-2"
               type="date"
               value={form.fecha_compra}
               onChange={(e) =>
                 setForm((f: any) => ({ ...f, fecha_compra: e.target.value }))
               }
             />
-            <button className="rounded-xl px-3 py-2 bg-black text-white">
+            <input
+              required
+              className="border rounded-xl px-3 py-2 md:col-span-2"
+              type="date"
+              value={form.fecha_finish}
+              onChange={(e) =>
+                setForm((f: any) => ({ ...f, fecha_finish: e.target.value }))
+              }
+            />
+            <input
+              required
+              className="border rounded-xl px-3 py-2 md:col-span-2"
+              type="number"
+              step="1"
+              placeholder="Cantidad letras"
+              value={form.cantidad}
+              onChange={(e) =>
+                setForm((f: any) => ({ ...f, cantidad: e.target.value }))
+              }
+            />
+            <button className="rounded-xl px-3 py-2 bg-black text-white md:col-span-2">
               Agregar
             </button>
           </form>
@@ -348,14 +359,13 @@ function Dashboard({ user }: { user: any }) {
               <table className="w-full text-sm">
                 <thead className="text-left border-b">
                   <tr className="[&>th]:py-2 [&>th]:pr-3">
-                    <th>Especie</th>
-                    <th>Venc.</th>
-                    <th>Días</th>
-                    <th>VN</th>
+                    <th>Ticker</th>
+                    <th>Compra</th>
+                    <th>Finish</th>
                     <th>Cant.</th>
-                    <th>Precio</th>
                     <th>Invertido</th>
-                    <th>VN Total</th>
+                    <th>Valor Finish</th>
+                    <th>Días</th>
                     <th>TNA</th>
                     <th>TEA</th>
                     <th>YTM</th>
@@ -370,14 +380,13 @@ function Dashboard({ user }: { user: any }) {
                         key={r.id}
                         className="border-b last:border-0 [&>td]:py-2 [&>td]:pr-3"
                       >
-                        <td className="font-medium">{r.especie}</td>
-                        <td>{new Date(r.vencimiento).toLocaleDateString()}</td>
-                        <td>{m.dias}</td>
-                        <td>{fmtNumber(Number(r.valor_nominal))}</td>
-                        <td>{fmtNumber(Number(r.cantidad), 0)}</td>
-                        <td>{fmtNumber(Number(r.precio_compra))}</td>
+                        <td className="font-medium">{r.ticker}</td>
+                        <td>{fmtNumber(r.precio_compra)}</td>
+                        <td>{fmtNumber(r.precio_finish)}</td>
+                        <td>{fmtNumber(r.cantidad, 0)}</td>
                         <td>{fmtNumber(m.P)}</td>
-                        <td>{fmtNumber(m.VN)}</td>
+                        <td>{fmtNumber(m.VF)}</td>
+                        <td>{m.dias}</td>
                         <td>{fmtPct(m.tna)}</td>
                         <td>{fmtPct(m.tea)}</td>
                         <td>{fmtPct(m.ytm)}</td>
@@ -397,12 +406,20 @@ function Dashboard({ user }: { user: any }) {
             </div>
           )}
         </section>
+
+        <section className="text-xs text-gray-500">
+          <p>
+            Fórmulas: Invertido = cantidad × precio_compra. Valor a Finish =
+            cantidad × precio_finish. TNA ≈ ((VF−P)/P)×(365/días). TEA =
+            (VF/P)^(365/días) − 1. YTM ≈ TEA. No incluye gastos/impuestos.
+          </p>
+        </section>
       </main>
     </div>
   )
 }
 
-// 📦 Card helper
+/* ============= UI helper ============= */
 function Card({ title, children }: { title: string; children: any }) {
   return (
     <div className="bg-white rounded-2xl shadow p-4">
